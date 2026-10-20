@@ -1,33 +1,49 @@
-name: Build CallScheduler Debug APK
-
+name: Build CallScheduler local models
 on:
   push:
-    branches: [ "main", "master" ]
+    branches: [main, 'local-model-v4-*']
+  pull_request:
   workflow_dispatch:
-
+permissions:
+  contents: read
 jobs:
-  build-apk:
+  build:
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
-      - name: Checkout source code
-        uses: actions/checkout@v4
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
         with:
+          distribution: temurin
           java-version: '17'
-          distribution: 'temurin'
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Install native toolchain
+        run: sdkmanager 'platforms;android-36' 'build-tools;35.0.0' 'ndk;28.2.13676358' 'cmake;3.22.1'
+      - name: Test and build
+        run: bash ./gradlew --no-daemon --max-workers=2 testDebugUnitTest assembleDebug assembleRelease
+      - name: Optional release signing with private Secrets
+        if: github.event_name != 'pull_request'
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo 'No signing secrets; debug and unsigned release artifacts are available.'
+            exit 0
+          fi
+          keyfile="$RUNNER_TEMP/callscheduler-signing.jks"
+          trap 'rm -f "$keyfile"' EXIT
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > "$keyfile"
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign --ks "$keyfile" --ks-pass env:STORE_PASSWORD --ks-key-alias "$KEY_ALIAS" --key-pass env:KEY_PASSWORD --out app/build/outputs/apk/release/CallScheduler-signed.apk app/build/outputs/apk/release/app-release-unsigned.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify app/build/outputs/apk/release/CallScheduler-signed.apk
+      - uses: actions/upload-artifact@v4
         with:
-          gradle-version: '8.7'
-
-      - name: Build Debug APK
-        run: gradle assembleDebug --no-daemon
-
-      - name: Upload Compiled APK Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: CallScheduler-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: CallScheduler-build-${{ github.run_number }}
+          path: |
+            app/build/outputs/apk/debug/*.apk
+            app/build/outputs/apk/release/*.apk
+            app/build/reports/tests/testDebugUnitTest/
+          retention-days: 14

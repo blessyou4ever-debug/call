@@ -5,6 +5,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.widget.Toast
+import com.example.callscheduler.data.calendar.CalendarSyncResult
 import com.example.callscheduler.data.calendar.GoogleCalendarSyncManager
 import com.example.callscheduler.data.local.db.AppDatabase
 import kotlinx.coroutines.CoroutineScope
@@ -26,10 +27,24 @@ class NotificationActionReceiver : BroadcastReceiver() {
                 when (intent.action) {
                     ConfirmationNotificationHelper.ACTION_CONFIRM -> {
                         val calendarManager = GoogleCalendarSyncManager(context)
-                        val eventId = calendarManager.insertEventToGoogleCalendar(item)
-                        dao.updateActionStatus(actionId, "CONFIRMED", eventId)
-                        withContext(Dispatchers.Main) {
-                            Toast.makeText(context, "구글 캘린더에 일정이 등록되었습니다.", Toast.LENGTH_SHORT).show()
+                        when (val syncResult = calendarManager.insertEventOrLaunchFallback(item)) {
+                            is CalendarSyncResult.InsertedDirectly -> {
+                                dao.updateActionStatus(actionId, "CONFIRMED", syncResult.eventId)
+                                withContext(Dispatchers.Main) {
+                                    Toast.makeText(context, "구글 캘린더에 일정이 즉시 등록되었습니다.", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                            is CalendarSyncResult.LaunchedCalendarIntent -> {
+                                dao.updateActionStatus(actionId, "CONFIRMED", null)
+                                withContext(Dispatchers.Main) {
+                                    Toast.makeText(context, "캘린더 앱에서 저장 버튼을 눌러 완료해 주세요.", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                            is CalendarSyncResult.Failed -> {
+                                withContext(Dispatchers.Main) {
+                                    Toast.makeText(context, "캘린더 등록 실패: ${syncResult.reason}", Toast.LENGTH_LONG).show()
+                                }
+                            }
                         }
                     }
                     ConfirmationNotificationHelper.ACTION_DISMISS -> {

@@ -1,24 +1,74 @@
 package com.example.callscheduler.data.calendar
 
+import android.Manifest
 import android.content.ContentValues
 import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.provider.CalendarContract
+import androidx.core.content.ContextCompat
 import com.example.callscheduler.data.local.db.ActionItemEntity
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.util.TimeZone
+
+sealed class CalendarSyncResult {
+    data class InsertedDirectly(val eventId: Long) : CalendarSyncResult()
+    data object LaunchedCalendarIntent : CalendarSyncResult()
+    data class Failed(val reason: String) : CalendarSyncResult()
+}
 
 class GoogleCalendarSyncManager(private val context: Context) {
 
+    fun hasCalendarPermissions(): Boolean {
+        val readGranted = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.READ_CALENDAR
+        ) == PackageManager.PERMISSION_GRANTED
+        val writeGranted = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.WRITE_CALENDAR
+        ) == PackageManager.PERMISSION_GRANTED
+        return readGranted && writeGranted
+    }
+
+    suspend fun insertEventOrLaunchFallback(item: ActionItemEntity): CalendarSyncResult = withContext(Dispatchers.IO) {
+        if (item.startEpochMillis == null || item.endEpochMillis == null || item.endEpochMillis <= item.startEpochMillis) {
+            return@withContext CalendarSyncResult.Failed("수정 화면에서 시작/종료 시각을 입력해 주세요.")
+        }
+        if (hasCalendarPermissions()) {
+            val directId = runCatching { insertEventToGoogleCalendarSync(item) }.getOrNull()
+            if (directId != null && directId > 0L) {
+                return@withContext CalendarSyncResult.InsertedDirectly(directId)
+            }
+        }
+        return@withContext runCatching {
+            launchCalendarInsertIntent(item)
+            CalendarSyncResult.LaunchedCalendarIntent
+        }.getOrElse { e ->
+            CalendarSyncResult.Failed(e.message ?: "캘린더 앱을 열 수 없습니다.")
+        }
+    }
+
+    @Deprecated("Use insertEventOrLaunchFallback for safe IO and permission handling")
     fun insertEventToGoogleCalendar(item: ActionItemEntity): Long? {
+        if (!hasCalendarPermissions()) return null
+        return runCatching { insertEventToGoogleCalendarSync(item) }.getOrNull()
+    }
+
+    private fun insertEventToGoogleCalendarSync(item: ActionItemEntity): Long? {
         val calendarId = findPrimaryGoogleCalendarId() ?: return null
-        val startMillis = item.startEpochMillis ?: (System.currentTimeMillis() + 3600_000L)
-        val endMillis = item.endEpochMillis ?: (startMillis + 1800_000L)
+        val startMillis = requireNotNull(item.startEpochMillis) { "시작 시각 입력 필요" }
+        val endMillis = requireNotNull(item.endEpochMillis) { "종료 시각 입력 필요" }
 
         val values = ContentValues().apply {
             put(CalendarContract.Events.DTSTART, startMillis)
             put(CalendarContract.Events.DTEND, endMillis)
             put(CalendarContract.Events.TITLE, item.title)
-            put(CalendarContract.Events.DESCRIPTION, "${item.description}
-(통화 상대: ${item.contactName} ${item.phoneNumber})")
+            put(
+                CalendarContract.Events.DESCRIPTION,
+                "${item.description}\n(통화 상대: ${item.contactName})"
+            )
             put(CalendarContract.Events.CALENDAR_ID, calendarId)
             put(CalendarContract.Events.EVENT_TIMEZONE, TimeZone.getDefault().id)
             if (!item.location.isNullOrBlank()) {
@@ -35,19 +85,41 @@ class GoogleCalendarSyncManager(private val context: Context) {
                 put(CalendarContract.Reminders.EVENT_ID, eventId)
                 put(CalendarContract.Reminders.METHOD, CalendarContract.Reminders.METHOD_ALERT)
             }
-            context.contentResolver.insert(CalendarContract.Reminders.CONTENT_URI, reminderValues)
+            runCatching {
+                context.contentResolver.insert(CalendarContract.Reminders.CONTENT_URI, reminderValues)
+            }
         }
 
         return eventId
+    }
+
+    fun launchCalendarInsertIntent(item: ActionItemEntity) {
+        val startMillis = requireNotNull(item.startEpochMillis) { "시작 시각 입력 필요" }
+        val endMillis = requireNotNull(item.endEpochMillis) { "종료 시각 입력 필요" }
+        val intent = Intent(Intent.ACTION_INSERT).apply {
+            data = CalendarContract.Events.CONTENT_URI
+            putExtra(CalendarContract.EXTRA_EVENT_BEGIN_TIME, startMillis)
+            putExtra(CalendarContract.EXTRA_EVENT_END_TIME, endMillis)
+            putExtra(CalendarContract.Events.TITLE, item.title)
+            putExtra(
+                CalendarContract.Events.DESCRIPTION,
+                "${item.description}\n(통화 상대: ${item.contactName})"
+            )
+            if (!item.location.isNullOrBlank()) {
+                putExtra(CalendarContract.Events.EVENT_LOCATION, item.location)
+            }
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        context.startActivity(intent)
     }
 
     private fun findPrimaryGoogleCalendarId(): Long? {
         val projection = arrayOf(
             CalendarContract.Calendars._ID,
             CalendarContract.Calendars.ACCOUNT_TYPE,
-            CalendarContract.Calendars.IS_PRIMARY
+            CalendarContract.Calendars.IS_PRIMARY,
+            CalendarContract.Calendars.VISIBLE
         )
-        // 구글 계정(com.google) 캘린더 우선 조회, 없을 경우 기기 내 기본 캘린더 사용
         context.contentResolver.query(
             CalendarContract.Calendars.CONTENT_URI,
             projection,
@@ -61,7 +133,8 @@ class GoogleCalendarSyncManager(private val context: Context) {
                 val id = cursor.getLong(0)
                 val accountType = cursor.getString(1) ?: ""
                 val isPrimary = cursor.getInt(2) == 1
-                if (anyCalendarId == null) anyCalendarId = id
+                val isVisible = cursor.getInt(3) == 1
+                if (anyCalendarId == null && isVisible) anyCalendarId = id
                 if (accountType == "com.google") {
                     if (isPrimary) return id
                     if (googleFallbackId == null) googleFallbackId = id

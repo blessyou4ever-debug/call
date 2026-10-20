@@ -29,17 +29,6 @@ class ConfirmationNotificationHelper(private val context: Context) {
         )
         notificationManager.createNotificationChannel(channel)
 
-        val confirmIntent = Intent(context, NotificationActionReceiver::class.java).apply {
-            action = ACTION_CONFIRM
-            putExtra(EXTRA_ACTION_ID, item.id)
-        }
-        val confirmPendingIntent = PendingIntent.getBroadcast(
-            context,
-            item.id.toInt(),
-            confirmIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
         val editIntent = Intent(context, ActionEditBottomSheetActivity::class.java).apply {
             putExtra(EXTRA_ACTION_ID, item.id)
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -74,13 +63,11 @@ class ConfirmationNotificationHelper(private val context: Context) {
             .setContentText(item.title)
             .setStyle(
                 NotificationCompat.BigTextStyle()
-                    .bigText("${item.title}
-• 상세: ${item.description}
-• 장소/연락처: ${item.location ?: "미지정"}")
+                    .bigText("${item.title}\n• 상세: ${item.description}\n• 장소/연락처: ${item.location ?: "미지정"}")
             )
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setContentIntent(editPendingIntent)
-            .addAction(0, "구글 캘린더 등록", confirmPendingIntent)
+            .addAction(0, "확인·수정 후 등록", editPendingIntent)
             .addAction(0, "내용 수정", editPendingIntent)
             .addAction(0, "무시", dismissPendingIntent)
             .setAutoCancel(true)
